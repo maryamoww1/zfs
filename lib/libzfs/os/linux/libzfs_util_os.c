@@ -79,6 +79,62 @@ libzfs_error_init(int error)
 }
 
 /*
+ * Detects whether we're running on a container by accessing
+ * - /run/systemd/container and checking if it's true
+ * - /proc/1/cgroup and checking for common container cgroup names
+ * - /proc/self/mountinfo and checking for common container cgroup names
+ * - /proc/self/cgroup and checking for common container cgroup names
+ * - /proc/1/environ environment variable container=
+ */
+static int
+is_in_container(void)
+{
+	size_t n = 0;
+	char buf[4096];
+	FILE *f;
+	const char* container_paths[] = {
+		"/proc/1/cgroup",
+		"/proc/self/mountinfo",
+		"/proc/self/cgroup"
+	};
+	if (access("/run/systemd/container", F_OK) == 0)
+		return (1);
+	for (int i = 0; i < sizeof(container_paths)/sizeof(container_paths[0]); ++i) {
+		f = fopen(container_paths[i], "r");
+		while (f && fgets(buf, sizeof(buf), f)) {
+			if (strstr(buf, "docker") ||
+			    strstr(buf, "lxc") ||
+			    strstr(buf, "kubepods") ||
+			    strstr(buf, "podman") ||
+			    strstr(buf, "rkt") ||
+			    strstr(buf, "systemd-nspawn") ||
+			    strstr(buf, "garden") ||
+			    strstr(buf, "mesos") ||
+			    strstr(buf, "libpod") ||
+			    strstr(buf, "oci") ||
+			    strstr(buf, "crio") ||
+			    strstr(buf, "libvirt-lxc") ||
+			    strstr(buf, "open-vz") ||
+			    strstr(buf, "containerd")) {
+				if (f) fclose(f);
+				return (1);
+			}
+		}
+		if (f) fclose(f);
+	}
+	f = fopen("/proc/1/environ", "r");
+	if (f && (n = fread(buf, 1, sizeof(buf)-1, f)) > 0) {
+		buf[n] = 0;
+		if (strstr(buf, "container=")) {
+			if (f) fclose(f);
+			return (1);
+		}
+	}
+	if (f) fclose(f);
+	return (0);
+}
+
+/*
  * zfs(4) is loaded by udev if there's a fstype=zfs device present,
  * but if there isn't, load them automatically;
  * always wait for ZFS_DEV to appear via udev.
@@ -104,6 +160,8 @@ libzfs_load_module(void)
 
 	const char *timeout_str = getenv("ZFS_MODULE_TIMEOUT");
 	int seconds = 10;
+	if (is_in_container())
+		seconds = 0;
 	if (timeout_str)
 		seconds = MIN(strtol(timeout_str, NULL, 0), 600);
 	struct itimerspec timeout = {.it_value.tv_sec = MAX(seconds, 0)};
